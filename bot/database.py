@@ -50,7 +50,8 @@ class Database:
             "n_used_tokens": {},
 
             "n_generated_images": 0,
-            "n_transcribed_seconds": 0.0  # voice message transcription
+            "n_transcribed_seconds": 0.0,  # voice message transcription
+            "user_balance": 30  # added balance field
         }
 
         if not self.check_if_user_exists(user_id):
@@ -106,6 +107,12 @@ class Database:
             }
 
         self.set_user_attribute(user_id, "n_used_tokens", n_used_tokens_dict)
+        
+    def get_user_ids(self):
+        users = []
+        for user_dict in self.user_collection.find({}):
+            users.append(user_dict['_id'])
+        return users
 
     def get_dialog_messages(self, user_id: int, dialog_id: Optional[str] = None):
         self.check_if_user_exists(user_id, raise_exception=True)
@@ -126,3 +133,9 @@ class Database:
             {"_id": dialog_id, "user_id": user_id},
             {"$set": {"messages": dialog_messages}}
         )
+        
+    def get_user_balance(self, user_id: int):
+        return self.get_user_attribute(user_id, "user_balance")
+
+    def update_user_balance(self, user_id: int, new_balance: int):
+        self.set_user_attribute(user_id, "user_balance", new_balance)

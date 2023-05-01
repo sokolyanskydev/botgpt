@@ -53,6 +53,8 @@ HELP_MESSAGE = """Команды:
 🎨 Генерация изображений из текстовых запросов в режиме <b>👩‍🎨 Художник</b> /mode
 👥 Добавить бота в <b>групповой чат</b>: /help_group_chat
 🎤 Вы можете отправлять <b>голосовые сообщения</b> вместо текста
+
+В демо-режиме доступно 30 запросов к боту.
 """
 
 HELP_GROUP_CHAT_MESSAGE = """Вы можете добавить бота в любой <b>групповой чат</b>, чтобы помочь и развлечь его участников!
@@ -66,6 +68,8 @@ HELP_GROUP_CHAT_MESSAGE = """Вы можете добавить бота в лю
 Например: "{bot_username} напиши стихотворение о Telegram"
 """
 
+def is_admin(user_id: int) -> bool:
+    return user_id in config.admin_user_ids
 
 def split_text_into_chunks(text, chunk_size):
     for i in range(0, len(text), chunk_size):
@@ -185,6 +189,13 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
     # check if bot was mentioned (for group chats)
     if not await is_bot_mentioned(update, context):
         return
+        
+    user_id = update.message.from_user.id
+    user_balance = db.get_user_attribute(user_id, "user_balance")
+    
+    if user_balance < 1:
+        await update.message.reply_text("❌ У вас недостаточно средств на балансе. Пожалуйста, пополните его, чтобы продолжить общение.", parse_mode=ParseMode.HTML)
+        return
 
     # check if message is edited
     if update.edited_message is not None:
@@ -200,7 +211,6 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
-    user_id = update.message.from_user.id
     chat_mode = db.get_user_attribute(user_id, "current_chat_mode")
 
     if chat_mode == "artist":
@@ -222,7 +232,9 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
         try:
             # send placeholder message to user
             placeholder_message = await update.message.reply_text("...")
-
+            
+            db.set_user_attribute(user_id, "user_balance", user_balance - 1)
+            
             # send typing action
             await update.message.chat.send_action(action="typing")
 
@@ -424,7 +436,7 @@ async def cancel_handle(update: Update, context: CallbackContext):
         task = user_tasks[user_id]
         task.cancel()
     else:
-        await update.message.reply_text("<i>Nothing to cancel...</i>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("<i>Нечего отменять...</i>", parse_mode=ParseMode.HTML)
 
 
 def get_chat_mode_menu(page_index: int):
@@ -577,6 +589,9 @@ async def show_balance_handle(update: Update, context: CallbackContext):
 
     user_id = update.message.from_user.id
     db.set_user_attribute(user_id, "last_interaction", datetime.now())
+    
+    # Получение баланса пользователя
+    user_balance = db.get_user_balance(user_id)
 
     # подсчитать общую статистику использования
     total_n_spent_dollars = 0
@@ -614,6 +629,7 @@ async def show_balance_handle(update: Update, context: CallbackContext):
 
     text = f"Вы потратили <b>{total_n_spent_dollars:.03f}$</b>\n"
     text += f"Вы использовали <b>{total_n_used_tokens}</b> токенов\n\n"
+    text += f"Ваш текущий баланс: <b>{user_balance}</b>\n\n"  # Добавьте строку с балансом пользователя
     text += details_text
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -622,6 +638,38 @@ async def show_balance_handle(update: Update, context: CallbackContext):
 async def edited_message_handle(update: Update, context: CallbackContext):
     text = "🥲 К сожалению, <b>редактирование</b> сообщения не поддерживается"
     await update.edited_message.reply_text(text, parse_mode=ParseMode.HTML)
+    
+async def add_balance_handle(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    
+    if not is_admin(user_id):
+        await update.message.reply_text("Вы не являетесь администратором и не можете пополнять баланс.")
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Введите ID пользователя и сумму для пополнения баланса.")
+        return
+
+    target_user_id = int(args[0])
+    amount = float(args[1])
+
+    if target_user_id not in db.get_user_ids():
+        await update.message.reply_text("Пользователь с таким ID не найден.")
+        return
+
+    current_balance = db.get_user_attribute(target_user_id, "user_balance")
+    new_balance = current_balance + amount
+    db.set_user_attribute(target_user_id, "user_balance", new_balance)
+
+    await update.message.reply_text(f"Баланс пользователя с ID {target_user_id} успешно пополнен на {amount}. Новый баланс: {new_balance}")
+
+    # Отправка уведомления пользователю
+    try:
+        await context.bot.send_message(target_user_id, f"Ваш баланс был изменен администратором. Текущий баланс: {new_balance}")
+    except Exception as e:
+        await update.message.reply_text(f"Не удалось отправить уведомление пользователю с ID {target_user_id}. Ошибка: {e}")
+
 
 
 async def error_handle(update: Update, context: CallbackContext) -> None:
@@ -657,6 +705,10 @@ async def post_init(application: Application):
         BotCommand("/balance", "Показать баланс"),
         BotCommand("/help", "Показать сообщение справки"),
     ])
+
+for user in db.user_collection.find({}):
+    if "user_balance" not in user:
+        db.set_user_attribute(user["_id"], "user_balance", 0)
 
 def run_bot() -> None:
     application = (
@@ -694,6 +746,8 @@ def run_bot() -> None:
     application.add_handler(CallbackQueryHandler(set_settings_handle, pattern="^set_settings"))
 
     application.add_handler(CommandHandler("balance", show_balance_handle, filters=user_filter))
+    application.add_handler(CommandHandler("addbalance", add_balance_handle))
+
 
     application.add_error_handler(error_handle)
 
